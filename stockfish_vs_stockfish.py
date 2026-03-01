@@ -1,19 +1,22 @@
 import pexpect, time, chess, random
 
-ENGINE_PATHS = {"Engine A": "engines/stockfish", "Engine B": "engines/stockfish"}
+ENGINE_PATHS = {"Engine A": "/content/stockfish/stockfish-ubuntu-x86-64-avx2", "Engine B": "/content/stockfish/stockfish-ubuntu-x86-64-avx2"}
 
-def start_engine(path: str, name: str="Engine", chess960: bool=False, threads: int=None, hash_size:int=None):
-    e = pexpect.spawn(path, encoding="utf-8", timeout=None)
+def start_engine(path: str, name: str="Engine", chess960: bool=False, threads: int=None, hash_size:int=None, total_game_timelimit_ms: int=600000):
+    # Set a timeout for pexpect operations, based on total game time limit plus a buffer
+    # This prevents indefinite hangs if the engine becomes unresponsive.
+    pexpect_timeout = (total_game_timelimit_ms / 1000) + 30 # Convert to seconds and add 30s buffer
+    e = pexpect.spawn(path, encoding="utf-8", timeout=pexpect_timeout)
     e.sendline("uci"); e.expect("uciok", timeout=120)
     if chess960:
         try: e.sendline("setoption name UCI_Chess960 value true")
-        except: pass
+        except Exception as ex: print(f"[{name}] WARNING: Could not set UCI_Chess960 option: {ex}")
     if threads is not None:
         try: e.sendline(f"setoption name Threads value {int(threads)}")
-        except: pass
+        except Exception as ex: print(f"[{name}] WARNING: Could not set Threads option: {ex}")
     if hash_size is not None:
         try: e.sendline(f"setoption name Hash value {int(hash_size)}")
-        except: pass
+        except Exception as ex: print(f"[{name}] WARNING: Could not set Hash option: {ex}")
     e.sendline("isready"); e.expect("readyok", timeout=120)
     print(f"{name} iniciado e pronto."); return e
 
@@ -23,6 +26,8 @@ def get_engine_move_data(e, fen: str, wtime:int, btime:int, winc:int, binc:int, 
     t0 = time.monotonic()
     while True:
         try:
+            # Using e.readline() without an explicit timeout relies on pexpect.spawn's timeout.
+            # With the fix above, this will now respect the pexpect_timeout.
             line = e.readline().strip()
             if not line: continue
             if "info" in line:
@@ -34,7 +39,7 @@ def get_engine_move_data(e, fen: str, wtime:int, btime:int, winc:int, binc:int, 
                         stype = p[p.index("score")+1]; sval = int(p[p.index("score")+2])
                         if stype == "cp": score_cp = sval/100.0; score_mate = None
                         else: score_mate = sval; score_cp = None
-                except: pass
+                except Exception as ex: print(f"[{name}] WARNING: Erro ao analisar linha de informação: {ex}")
             if line.startswith("bestmove"):
                 best = line.split()[1]; break
         except Exception as ex:
@@ -58,7 +63,7 @@ def _generate_chess960_board():
         return chess.Board(chess.STARTING_FEN)
 
 def run_chess_match(n1,p1,n2,p2,config):
-    print(f"===== INICIANDO PARTIDA ENTRE {n1.upper()} E {n2.upper()} =====")
+    print(f"===== INICIANDO PARTIDA ENTRE {n1.upper()} E {n2.upper()} ====")
     e1 = e2 = None
     if config.get("chess960", False):
         board = _generate_chess960_board()
@@ -66,12 +71,15 @@ def run_chess_match(n1,p1,n2,p2,config):
     else:
         board = chess.Board(config.get("initial_fen", chess.STARTING_FEN))
     moves_played = 0; game_pgn = ""; result="*"
-    t1 = t2 = config.get("timelimit_ms",600000)
+    total_timelimit_ms = config.get("timelimit_ms",600000)
+    t1 = t2 = total_timelimit_ms
     try:
         e1 = start_engine(p1, n1, chess960=config.get("chess960", False),
-                          threads=config.get("threads"), hash_size=config.get("hash_size"))
+                          threads=config.get("threads"), hash_size=config.get("hash_size"),
+                          total_game_timelimit_ms=total_timelimit_ms)
         e2 = start_engine(p2, n2, chess960=config.get("chess960", False),
-                          threads=config.get("threads"), hash_size=config.get("hash_size"))
+                          threads=config.get("threads"), hash_size=config.get("hash_size"),
+                          total_game_timelimit_ms=total_timelimit_ms)
         while not board.is_game_over() and moves_played < config.get("num_moves",50):
             white = board.turn==chess.WHITE
             name = n1 if white else n2
@@ -114,7 +122,6 @@ def run_chess_match(n1,p1,n2,p2,config):
                 except: pass
 
 if __name__=="__main__":
-    match_config = {'chess960': True, 'hash_size':2000,'threads':2,'timelimit_ms':15000,'increment_ms':0,'num_moves':1000,
-                    'initial_fen': chess.STARTING_FEN}
+    match_config = {'chess960': False, 'hash_size':2000,'threads':2,'timelimit_ms':15000,'increment_ms':0,'num_moves':1000,
+                    'initial_fen': "r3k2r/1b1nbpp1/p1pp1n1p/1p2p3/3PP1P1/4BP1P/PPPNN3/R3KBR1 w Qkq - 1 13"}
     run_chess_match("Stockfish", ENGINE_PATHS["Engine A"], "Stockfish", ENGINE_PATHS["Engine B"], match_config)
-    
