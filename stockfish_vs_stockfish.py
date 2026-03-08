@@ -136,6 +136,12 @@ def run_chess_match(n1,p1,n2,p2,config):
                 name
             )
 
+            # Condição de desistência baseada em CP
+            if cp is not None and cp <= -2.00:
+                print(f"[{name}] desiste devido à avaliação desfavorável (<= -2.00 CP).")
+                result = "0-1" if white else "1-0"
+                break
+
             if not best or best=="resign":
                 print(f"[{name}] desistiu ou não encontrou jogada.")
                 result = "0-1" if white else "1-0"
@@ -188,7 +194,7 @@ if __name__=="__main__":
         'hash_size':256,
         'threads':1,
         'depth':18,
-        'movetime_ms':3000,
+        'movetime_ms':1000,
         'num_moves':1000,
         'initial_fen': "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
     }
