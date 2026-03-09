@@ -158,12 +158,6 @@ def run_chess_match(n1,p1,n2,p2,config):
                 result = "0-1" if white else "1-0"
                 break
 
-            # Adiciona condição para empate por tripla repetição
-            if board.is_repetition():
-                print(f"[{name}] A partida terminou em empate por tripla repetição.")
-                result = "1/2-1/2"
-                break
-
             score_str = f"({cp:.2f} CP)" if cp is not None else (f"(Mate em {mate})" if mate is not None else "")
             depth_str = f", Profundidade: {depth_found}" if depth_found is not None else ""
             nps_str = f", NPS: {nps:,.0f}" if nps is not None else ""
@@ -206,3 +200,4 @@ if __name__=="__main__":
     }
 
     run_chess_match("Stockfish", ENGINE_PATHS["Engine A"], "Stockfish", ENGINE_PATHS["Engine B"], match_config)
+    
