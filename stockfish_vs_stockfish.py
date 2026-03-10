@@ -1,203 +1,141 @@
-import pexpect, time, chess, random
+import pexpect, time, chess, chess.pgn, random, os
+from datetime import datetime
 
 ENGINE_PATHS = {"Engine A": "/content/stockfish/stockfish-ubuntu-x86-64-avx2", "Engine B": "/content/stockfish/stockfish-ubuntu-x86-64-avx2"}
 
-def start_engine(path: str, name: str="Engine", chess960: bool=False, threads: int=None, hash_size:int=None, total_game_timelimit_ms: int=600000):
-    pexpect_timeout = (total_game_timelimit_ms / 1000) + 30
-    e = pexpect.spawn(path, encoding="utf-8", timeout=pexpect_timeout)
-    e.sendline("uci"); e.expect("uciok", timeout=120)
-
-    if chess960:
+def start_engine(p, n="Engine", c960=False, th=None, hz=None, tlim=600000):
+    if not os.path.isfile(p): raise FileNotFoundError(f"Engine {p} não encontrado")
+    e = pexpect.spawn(p, encoding="utf-8", timeout=tlim/1000+30)
+    e.sendline("uci"); e.expect("uciok", 120)
+    if c960:
         try: e.sendline("setoption name UCI_Chess960 value true")
-        except Exception as ex: print(f"[{name}] WARNING: Could not set UCI_Chess960 option: {ex}")
+        except Exception as ex: print(f"[{n}] WARNING: UCI_Chess960: {ex}")
+    if th:
+        try: e.sendline(f"setoption name Threads value {int(th)}")
+        except Exception as ex: print(f"[{n}] WARNING: Threads: {ex}")
+    if hz:
+        try: e.sendline(f"setoption name Hash value {int(hz)}")
+        except Exception as ex: print(f"[{n}] WARNING: Hash: {ex}")
+    e.sendline("isready"); e.expect("readyok", 120)
+    print(f"{n} iniciado e pronto."); return e
 
-    if threads is not None:
-        try: e.sendline(f"setoption name Threads value {int(threads)}")
-        except Exception as ex: print(f"[{name}] WARNING: Could not set Threads option: {ex}")
-
-    if hash_size is not None:
-        try: e.sendline(f"setoption name Hash value {int(hash_size)}")
-        except Exception as ex: print(f"[{name}] WARNING: Could not set Hash option: {ex}")
-
-    e.sendline("isready"); e.expect("readyok", timeout=120)
-    print(f"{name} iniciado e pronto.")
-    return e
-
-def prepare_engine_for_new_game(e, name="Engine"):
+def prepare_engine_for_new_game(e, n="Engine"):
     try:
         e.sendline("ucinewgame")
         e.sendline("setoption name Clear Hash")
         e.sendline("isready")
-        e.expect("readyok", timeout=120)
-    except Exception as ex:
-        print(f"[{name}] WARNING: Falha ao preparar nova partida: {ex}")
+        e.expect("readyok", 120)
+    except Exception as ex: print(f"[{n}] WARNING: prepare: {ex}")
 
-def get_engine_move_data(e, fen: str, depth_limit: int, movetime_ms: int, name="Engine"):
-    e.sendline(f"position fen {fen}")
-    e.sendline(f"go depth {depth_limit} movetime {movetime_ms}")
-
-    best = None; depth = None; nodes = 0; score_cp = score_mate = None
-    t0 = time.monotonic()
-
-    while True:
+def get_engine_move_data(e, fen, dl, mt, n="Engine"):
+    e.sendline(f"position fen {fen}"); e.sendline(f"go depth {dl} movetime {mt}")
+    b = d = nd = 0; sc = sm = None
+    t0 = time.monotonic(); timeout = t0 + mt/1000 + 5
+    while time.monotonic() < timeout:
         try:
-            line = e.readline()
-            if line == "":
-                raise RuntimeError(f"[{name}] Engine não respondeu (EOF).")
-
-            line = line.strip()
-            if not line:
-                continue
-
-            if "info" in line:
-                p = line.split()
+            l = e.readline().strip()
+            if not l: continue
+            if "info" in l:
+                p = l.split()
                 try:
-                    if "depth" in p: depth = int(p[p.index("depth")+1])
-                    if "nodes" in p: nodes = int(p[p.index("nodes")+1])
-                    if "score" in p:
-                        stype = p[p.index("score")+1]
-                        sval = int(p[p.index("score")+2])
-                        if stype == "cp":
-                            score_cp = sval/100.0; score_mate = None
-                        else:
-                            score_mate = sval; score_cp = None
-                except Exception as ex:
-                    print(f"[{name}] WARNING: Erro ao analisar linha de informação: {ex}")
-
-            if line.startswith("bestmove"):
-                best = line.split()[1]
-                break
-
+                    for i, t in enumerate(p):
+                        if t == "depth" and i+1 < len(p): d = int(p[i+1])
+                        if t == "nodes" and i+1 < len(p): nd = int(p[i+1])
+                        if t == "score" and i+2 < len(p):
+                            st, sv = p[i+1], int(p[i+2])
+                            if st == "cp": sc = sv/100.0; sm = None
+                            else: sm = sv; sc = None
+                except: pass
+            if l.startswith("bestmove"):
+                b = l.split()[1]; break
         except Exception as ex:
-            print(f"[{name}] ERRO ao ler saída da engine: {ex}")
-            best = "resign"
-            break
-
-    elapsed_ms = (time.monotonic()-t0)*1000
-    nps = nodes / (elapsed_ms/1000) if nodes and elapsed_ms>0 else 0
-    return best, depth, nodes, nps, score_cp, score_mate, elapsed_ms
-
-def _generate_chess960_board():
-    try:
-        idx = random.randrange(960)
-        try:
-            return chess.Board.from_chess960_pos(idx)
-        except AttributeError:
-            try:
-                pos = chess.chess960_starting_position(idx)
-                return chess.Board(pos)
-            except Exception:
-                return chess.Board(chess.STARTING_FEN)
-    except Exception:
-        return chess.Board(chess.STARTING_FEN)
-
-def run_chess_match(n1,p1,n2,p2,config):
-    print(f"===== INICIANDO PARTIDA ENTRE {n1.upper()} E {n2.upper()} ====")
-    e1 = e2 = None
-
-    if config.get("chess960", False):
-        board = _generate_chess960_board()
-        print(f"Posição inicial Chess960 (FEN): {board.fen()}")
+            print(f"[{n}] ERRO leitura: {ex}"); b = "resign"; break
     else:
-        board = chess.Board(config.get("initial_fen", chess.STARTING_FEN))
+        print(f"[{n}] timeout esperando bestmove"); b = "resign"
+    eT = (time.monotonic() - t0) * 1000
+    nps = nd / (eT/1000) if nd and eT > 0 else 0
+    return b, d, nd, nps, sc, sm, eT
 
-    moves_played = 0; game_pgn = ""; result="*"
-    total_game_timelimit_for_engine_init_ms = config.get("timelimit_ms",600000)
-
+def _generate_chess960_board(seed=None):
+    if seed is not None: random.seed(seed)
     try:
-        e1 = start_engine(p1, n1,
-                          chess960=config.get("chess960", False),
-                          threads=config.get("threads"),
-                          hash_size=config.get("hash_size"),
-                          total_game_timelimit_ms=total_game_timelimit_for_engine_init_ms)
+        i = random.randrange(960)
+        try: return chess.Board.from_chess960_pos(i)
+        except:
+            try: return chess.Board(chess.chess960_starting_position(i))
+            except: return chess.Board(chess.STARTING_FEN)
+    except: return chess.Board(chess.STARTING_FEN)
 
-        e2 = start_engine(p2, n2,
-                          chess960=config.get("chess960", False),
-                          threads=config.get("threads"),
-                          hash_size=config.get("hash_size"),
-                          total_game_timelimit_ms=total_game_timelimit_for_engine_init_ms)
-
-        prepare_engine_for_new_game(e1, n1)
-        prepare_engine_for_new_game(e2, n2)
-
-        while not board.is_game_over() and moves_played < config.get("num_moves",50):
-            white = board.turn==chess.WHITE
-            name = n1 if white else n2
-            proc = e1 if white else e2
-
-            print(f"\n--- Turno {board.fullmove_number}: {'Brancas' if white else 'Pretas'} ({name}) ---")
-            print("Tabuleiro atual:\n", board)
-
+def run_chess_match(n1, p1, n2, p2, c):
+    print(f"===== {n1.upper()} vs {n2.upper()} =====")
+    e1 = e2 = None
+    if c.get("chess960", 0):
+        b = _generate_chess960_board(c.get("seed")); print(f"Chess960 FEN: {b.fen()}")
+    else:
+        b = chess.Board(c.get("initial_fen", chess.STARTING_FEN))
+    game = chess.pgn.Game()
+    game.headers["Event"] = "Computer chess game"
+    game.headers["Site"] = "?"
+    game.headers["Date"] = datetime.now().strftime("%Y.%m.%d")
+    game.headers["Round"] = "?"
+    game.headers["White"] = n1
+    game.headers["Black"] = n2
+    game.headers["Result"] = "*"
+    if b.fen() != chess.STARTING_FEN: game.headers["FEN"] = b.fen()
+    node = game; mP = 0; r = "*"
+    tlim = c.get("timelimit_ms", 600000)
+    try:
+        e1 = start_engine(p1, n1, c960=c.get("chess960",0), th=c.get("threads"), hz=c.get("hash_size"), tlim=tlim)
+        e2 = start_engine(p2, n2, c960=c.get("chess960",0), th=c.get("threads"), hz=c.get("hash_size"), tlim=tlim)
+        prepare_engine_for_new_game(e1, n1); prepare_engine_for_new_game(e2, n2)
+        while not b.is_game_over() and mP < c.get("num_moves", 50):
+            w = b.turn == chess.WHITE
+            nm = n1 if w else n2
+            pr = e1 if w else e2
+            print(f"\n--- Turno {b.fullmove_number}: {'Brancas' if w else 'Pretas'} ({nm}) ---")
+            print("Tabuleiro:\n", b)
             best, depth_found, nodes, nps, cp, mate, used_ms = get_engine_move_data(
-                proc,
-                board.fen(),
-                config.get("depth", 18),
-                config.get("movetime_ms", 5000),
-                name
-            )
-
-            # Condição de desistência baseada em CP
+                pr, b.fen(), c.get("depth", 18), c.get("movetime_ms", 5000), nm)
+            if best == "(none)":
+                r = b.result(claim_draw=True); break
             if cp is not None and cp <= -2.00:
-                print(f"[{name}] desiste devido à avaliação desfavorável (<= -2.00 CP).")
-                result = "0-1" if white else "1-0"
-                break
-
-            if not best or best=="resign":
-                print(f"[{name}] desistiu ou não encontrou jogada.")
-                result = "0-1" if white else "1-0"
-                break
-
+                print(f"[{nm}] desiste (CP <= -2.00)"); r = "0-1" if w else "1-0"; break
+            if not best or best == "resign":
+                print(f"[{nm}] desistiu"); r = "0-1" if w else "1-0"; break
             try:
                 mv = chess.Move.from_uci(best)
-                if mv not in board.legal_moves:
-                    raise ValueError(f"Jogada ilegal retornada: {best}")
-                san = board.san(mv)
-                board.push(mv)
+                if mv not in b.legal_moves: raise ValueError(f"ilegal: {best}")
+                san = b.san(mv); b.push(mv); node = node.add_variation(mv)
             except Exception as ex:
-                print(f"[{name}] ERRO: {ex}. Partida encerrada.")
-                result = "0-1" if white else "1-0"
-                break
-
-            score_str = f"({cp:.2f} CP)" if cp is not None else (f"(Mate em {mate})" if mate is not None else "")
-            depth_str = f", Profundidade: {depth_found}" if depth_found is not None else ""
-            nps_str = f", NPS: {nps:,.0f}" if nps is not None else ""
-
-            print(f"[{name}] jogou: {san} ({best}) {score_str}{depth_str}{nps_str}")
-            print(f"Tempo gasto nesta jogada: {used_ms/1000:.1f}s")
-
-            game_pgn += (f"{board.fullmove_number}. {san} " if white else f"{san} ")
-            moves_played += 1
-
-        if board.is_game_over() and result=="*":
-            result = board.result()
-
-        print(f"\n===== PARTIDA ENCERRADA!\nResultado final: {result}\nPGN da partida:\n\n{game_pgn.strip()}\n")
-
+                print(f"[{nm}] ERRO: {ex}"); r = "0-1" if w else "1-0"; break
+            score_str = f"({cp:.2f} CP)" if cp is not None else (f"(Mate {mate})" if mate else "")
+            depth_str = f", prof:{depth_found}" if depth_found else ""
+            nps_str = f", NPS:{nps:,.0f}" if nps else ""
+            print(f"[{nm}] jogou: {san} ({best}) {score_str}{depth_str}{nps_str}")
+            print(f"tempo: {used_ms/1000:.1f}s")
+            mP += 1
+        if b.is_game_over() and r == "*": r = b.result()
+        game.headers["Result"] = r
+        print(f"\n===== PARTIDA ENCERRADA: {r} =====")
+        print("\n--- PGN completo ---\n")
+        print(game)
     except Exception as ex:
-        print(f"\nERRO FATAL INESPERADO: {ex}")
-        import traceback; traceback.print_exc()
-
+        print(f"\nERRO FATAL: {ex}"); import traceback; traceback.print_exc()
     finally:
-        print("\n--- Finalizando engines ---")
-        for proc,name in ((e1,n1),(e2,n2)):
+        print("\nFinalizando engines...")
+        for proc, name in ((e1, n1), (e2, n2)):
             if proc and proc.isalive():
-                try:
-                    proc.sendline("quit")
-                    proc.close()
-                    print(f"{name} encerrado.")
-                except:
-                    pass
+                try: proc.sendline("quit"); proc.close(); print(f"{name} encerrado.")
+                except: pass
+            if proc and proc.isalive():
+                try: proc.terminate()
+                except: pass
 
-if __name__=="__main__":
-    match_config = {
-        'chess960': False,
-        'hash_size':256,
-        'threads':1,
-        'depth':18,
-        'movetime_ms':1000,
-        'num_moves':1000,
-        'initial_fen': "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
-    }
-
-    run_chess_match("Stockfish", ENGINE_PATHS["Engine A"], "Stockfish", ENGINE_PATHS["Engine B"], match_config)
-    
+if __name__ == "__main__":
+    run_chess_match("Stockfish", ENGINE_PATHS["Engine A"],
+                    "Stockfish", ENGINE_PATHS["Engine B"],
+                    {
+                        'chess960': 0, 'seed': None, 'hash_size': 256, 'threads': 1,
+                        'depth': 18, 'movetime_ms': 1000, 'num_moves': 1000,
+                        'initial_fen': "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+                    })
