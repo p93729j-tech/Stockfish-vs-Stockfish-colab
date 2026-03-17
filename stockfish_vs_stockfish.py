@@ -1,6 +1,8 @@
 import pexpect, time, chess, chess.pgn, random, os
 from datetime import datetime
 
+pos = ""
+
 ENGINE_PATHS = {"Engine A": "/content/stockfish/stockfish-ubuntu-x86-64-avx2", "Engine B": "/content/stockfish/stockfish-ubuntu-x86-64-avx2"}
 
 def start_engine(p, n="Engine", c960=False, th=None, hz=None, tlim=600000):
@@ -135,7 +137,7 @@ if __name__ == "__main__":
     run_chess_match("Stockfish", ENGINE_PATHS["Engine A"],
                     "Stockfish", ENGINE_PATHS["Engine B"],
                     {
-                        'chess960': 0, 'seed': None, 'hash_size': 256, 'threads': 1,
+                        'chess960': 0, 'seed': None, 'hash_size': 564, 'threads': 1,
                         'depth': 18, 'movetime_ms': 1000, 'num_moves': 1000,
-                        'initial_fen': "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+                        'initial_fen': pos
                     })
